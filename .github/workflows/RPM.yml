@@ -24,6 +24,23 @@ concurrency:
 
 jobs:
 
+  version:
+    name: Specfile Version check
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Clone repository
+      uses: actions/checkout@v4
+    - name: Check RPM specfile version
+      run: |
+        export RPM_VERSION="v$(grep Version rpm/xrdcl-pelican.spec | cut -f 2 -d ' ')"
+        if ! git tag | grep -q $RPM_VERSION; then
+          echo "Version in rpm/xrdcl-pelican.spec currently is set to $RPM_VERSION"
+          echo "This is an existing tag in the repository.  The RPM specfile on a branch"
+          echo "must always point at the next release"
+          exit 1
+        fi
+
   alma9:
     name: Alma Linux 9
     runs-on: ubuntu-latest
