@@ -12,6 +12,9 @@ on:
     branches:
       - main
       - v*
+    tags:
+      - v[1-9][0-9]+\.[0-9]+\.[0-9]+
+      - v[1-9][0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+
     paths-ignore:
       - .gitignore
       - '**.md'
@@ -46,6 +49,9 @@ jobs:
     runs-on: ubuntu-latest
     container: almalinux:9
 
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+
     steps:
     - name: Install git
       run: yum install -y git
@@ -79,16 +85,20 @@ jobs:
       run: mkdir RPMS && mv $(rpm -E '%{_rpmdir}')/ RPMS$(rpm -E '%{dist}' | tr . /)
 
     - name: Upload Artifacts
+      id: upload
       uses: actions/upload-artifact@v4
       with:
         name: alma9
         path: RPMS
         retention-days: 14
 
-  alma10beta:
+  alma10:
     name: Alma Linux 10
     runs-on: ubuntu-latest
     container: almalinux:10
+
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
 
     steps:
     - name: Install git
@@ -124,7 +134,56 @@ jobs:
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
+      id: upload
       with:
         name: alma10
         path: RPMS
         retention-days: 14
+
+  release:
+    name: Create draft release on tag
+    runs-on: ubuntu-latest
+    container: almalinux:10
+    needs: [alma10, alma9]
+    if: github.ref_type == 'tag'
+
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Download Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        artifact-ids: ${{ needs.alma9.outputs.artifact-id }}, ${{ needs.alma10.outputs.artifact-id }}
+
+    - name: Generate changelog
+      shell: bash
+      run: |
+        ls -lh
+        rpm -qp --changelog xrdcl-pelican-*.el9.* | while IFS= read -r line; do if [ -z "$line" ]; then break; fi; echo "$line"; done > CHANGELOG.txt
+
+        export XRDCL_VERSION=$(rpm -qp xrdcl-pelican-*.el9.* --queryformat '%{VERSION}')
+        echo "RPM version detected: $XRDCL_VERSION"
+        if [ "$GITHUB_REF_NAME" != "v$XRDCL_VERSION" ]; then
+          echo "The github tag name ($GITHUB_REF_NAME) does not match the RPM version (v$XRDCL_VERSION)"
+          exit 1
+        fi
+
+        if head -n 1 CHANGELOG.txt | grep -q $XRDCL_VERSION; then
+          echo "The changelog entry in the produced RPM does not match the RPM version ($XRDCL_VERSION)"
+          exit 1
+        fi
+        tail -n +2 CHNAGELOG.txt > CHANGELOG.txt.new
+        mv CHANGELOG.txt.new CHANGELOG.txt
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: "*.rpm"
+        tag_name: ${{ github.ref_name }}
+        body_path: CHANGELOG.txt
+        draft: true
+        fail_on_unmatched_files: true
