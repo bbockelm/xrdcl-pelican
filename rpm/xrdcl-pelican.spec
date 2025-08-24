@@ -136,7 +136,7 @@ make install DESTDIR=$RPM_BUILD_ROOT
 - Fix the returned stat flags
 - Fix uninitialized read when using the broker
 
-* Tue Feb 5 2025 Brian Bockelman <bbockelman@morgridge.org> - 1.0.5-1
+* Wed Feb 5 2025 Brian Bockelman <bbockelman@morgridge.org> - 1.0.5-1
 - Fix build failures with some compilers.
 
 * Tue Feb 4 2025 Brian Bockelman <bbockelman@morgridge.org> - 1.0.4-1
