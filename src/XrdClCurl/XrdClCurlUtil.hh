@@ -204,9 +204,20 @@ public:
         }
     }
 
+    // Returns the age, in seconds, of the oldest request currently waiting in
+    // the queue.  Returns 0.0 if the queue is empty.
+    //
+    // Only meaningful on the global producer queue.  Per-worker continue queues
+    // hold paused ops awaiting more client data, so a large "age" there is
+    // expected behavior, not a stall.
+    double GetOldestEnqueueAgeSeconds();
+
 private:
     bool m_shutdown{false};
-    std::deque<std::shared_ptr<CurlOperation>> m_ops;
+    // Each entry is (op, time it was enqueued via Produce()); the timestamp is
+    // used to report the queue's head-of-line age for monitoring.
+    using QueueEntry = std::pair<std::shared_ptr<CurlOperation>, std::chrono::steady_clock::time_point>;
+    std::deque<QueueEntry> m_ops;
     static std::atomic<uint64_t> m_ops_consumed; // Count of operations consumed from the queue.
     static std::atomic<uint64_t> m_ops_produced; // Count of operations added to the queue.
     static std::atomic<uint64_t> m_ops_rejected; // Count of operations rejected by the queue.

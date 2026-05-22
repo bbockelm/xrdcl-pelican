@@ -283,12 +283,18 @@ Factory::Monitor()
         was_stalled = is_stalled;
         last_tick = steady_now;
 
+        // Gauge: age of the oldest request currently sitting in the global
+        // queue.  Reported only for the global queue (not per-worker continue
+        // queues, where a paused-PUT entry can legitimately be old).
+        double oldest_age_seconds = m_queue ? m_queue->GetOldestEnqueueAgeSeconds() : 0.0;
+
         std::string monitoring = "{\"event\": \"xrdclcurl\", "
             "\"start\": " + std::to_string(std::chrono::duration<double>(m_start.time_since_epoch()).count()) + ","
             "\"now\": " + std::to_string(std::chrono::duration<double>(now.time_since_epoch()).count()) + ","
             "\"file\": " + File::GetMonitoringJson() + ","
             "\"workers\": " + CurlWorker::GetMonitoringJson() + ","
-            "\"queues\": " + HandlerQueue::GetMonitoringJson() +
+            "\"queues\": " + HandlerQueue::GetMonitoringJson() + ","
+            "\"queue_oldest_age_seconds\": " + std::to_string(oldest_age_seconds) +
             " }";
         m_log->Info(kLogXrdClCurl, "Client monitoring statistics: %s", monitoring.c_str());
         if (gstream) {

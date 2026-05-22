@@ -687,7 +687,7 @@ HandlerQueue::Expire()
     auto now = std::chrono::steady_clock::now();
 
     // Iterate through the paused transfers, checking if they are done.
-    for (auto &op : m_ops) {
+    for (auto &[op, _enqueue_time] : m_ops) {
         if (!op->IsPaused()) continue;
 
         if (op->TransferStalled(0, now)) {
@@ -695,10 +695,11 @@ HandlerQueue::Expire()
         }
     }
 
-    std::vector<decltype(m_ops)::value_type> expired_ops;
+    std::vector<std::shared_ptr<CurlOperation>> expired_ops;
     unsigned expired_count = 0;
     auto it = std::remove_if(m_ops.begin(), m_ops.end(),
-        [&](const std::shared_ptr<CurlOperation> &handler) {
+        [&](const QueueEntry &entry) {
+            const auto &handler = entry.first;
             auto expired = handler->GetOperationExpiry() < now;
             if (expired) {
                 expired_ops.push_back(handler);
@@ -762,7 +763,7 @@ HandlerQueue::Produce(std::shared_ptr<CurlOperation> handler)
         return;
     }
 
-    m_ops.push_back(handler);
+    m_ops.push_back({handler, std::chrono::steady_clock::now()});
     char ready[] = "1";
     while (true) {
         auto result = write(m_write_fd, ready, 1);
@@ -793,7 +794,7 @@ HandlerQueue::Consume(std::chrono::steady_clock::duration dur)
         return {};
     }
 
-    std::shared_ptr<CurlOperation> result = m_ops.front();
+    std::shared_ptr<CurlOperation> result = m_ops.front().first;
     m_ops.pop_front();
 
     char ready[1];
@@ -817,6 +818,17 @@ HandlerQueue::Consume(std::chrono::steady_clock::duration dur)
     m_ops_consumed.fetch_add(1, std::memory_order_relaxed);
 
     return result;
+}
+
+double
+HandlerQueue::GetOldestEnqueueAgeSeconds()
+{
+    std::unique_lock<std::mutex> lk(m_mutex);
+    if (m_ops.empty()) {
+        return 0.0;
+    }
+    auto age = std::chrono::steady_clock::now() - m_ops.front().second;
+    return std::chrono::duration<double>(age).count();
 }
 
 std::string
@@ -850,12 +862,12 @@ HandlerQueue::TryConsume()
         return result;
     }
 
-    std::shared_ptr<CurlOperation> result = m_ops.front();
+    std::shared_ptr<CurlOperation> result = m_ops.front().first;
     m_ops.pop_front();
 
     char ready[1];
     while (true) {
-        auto result = read(m_read_fd, ready, 1); 
+        auto result = read(m_read_fd, ready, 1);
         if (result == -1) {
             if (errno == EINTR) {
                 continue;
