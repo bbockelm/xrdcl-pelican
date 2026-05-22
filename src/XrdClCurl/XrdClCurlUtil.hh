@@ -194,12 +194,24 @@ public:
     // Returns a summary of the queue's performance statistics.
     static std::string GetMonitoringJson();
 
+    // Record that an external watchdog observed a stalled queue (workers not
+    // making progress while ops are pending).  The duration represents the
+    // wall-clock time to attribute to this stall observation; the value is
+    // accumulated and exposed as "stalled_seconds" in the monitoring JSON.
+    static void RecordStall(std::chrono::milliseconds duration) {
+        if (duration.count() > 0) {
+            m_queue_stalled_ms.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
+        }
+    }
+
 private:
     bool m_shutdown{false};
     std::deque<std::shared_ptr<CurlOperation>> m_ops;
     static std::atomic<uint64_t> m_ops_consumed; // Count of operations consumed from the queue.
     static std::atomic<uint64_t> m_ops_produced; // Count of operations added to the queue.
     static std::atomic<uint64_t> m_ops_rejected; // Count of operations rejected by the queue.
+    static std::atomic<uint64_t> m_ops_expired; // Count of operations reaped by Expire() while waiting in queue.
+    static std::atomic<uint64_t> m_queue_stalled_ms; // Cumulative milliseconds the queue has been observed stalled.
     thread_local static std::vector<CURL*> m_handles;
     std::condition_variable m_consumer_cv;
     std::condition_variable m_producer_cv;

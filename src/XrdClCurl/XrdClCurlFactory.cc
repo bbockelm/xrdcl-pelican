@@ -24,6 +24,8 @@
 #include "XrdClCurlParseTimeout.hh"
 #include "XrdClCurlWorker.hh"
 
+#include <chrono>
+
 #include "XrdCl/XrdClConstants.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
 #include "XrdCl/XrdClLog.hh"
@@ -219,6 +221,21 @@ Factory::Monitor()
     gstream = gstream_void;
 #endif
 
+    // If no curl worker thread has completed a loop iteration in this long, the
+    // queue is considered stalled (workers dead, deadlocked, or stuck in libcurl).
+    // The worker maintenance period defaults to 5s and curl_multi_wait uses a
+    // 50ms timeout, so a healthy worker cycles many times per second.
+    constexpr auto kStallThreshold = std::chrono::seconds(60);
+
+    // Track whether we observed a stall on the prior monitor tick.  When we
+    // transition into stall, we attribute the full stall age so far (since the
+    // oldest worker cycle); while the stall continues, we attribute the time
+    // delta since the previous tick.  This makes `stalled_seconds` reflect the
+    // true wall-clock duration of the stall rather than undercounting by the
+    // threshold (60s) on each event.
+    bool was_stalled = false;
+    auto last_tick = std::chrono::steady_clock::now();
+
     while (true) {
         {
             std::unique_lock lock(m_shutdown_lock);
@@ -232,7 +249,39 @@ Factory::Monitor()
             }
         }
 
+        // Belt-and-suspenders: reap expired ops from the global queue even when
+        // every worker is dead or stuck.  Expire() is idempotent and cheap when
+        // nothing has expired.
+        if (m_queue) {
+            m_queue->Expire();
+        }
+
         auto now = std::chrono::system_clock::now();
+        auto steady_now = std::chrono::steady_clock::now();
+
+        // Watchdog: if no worker has cycled within the stall threshold, log
+        // loudly and accumulate the time spent in the stall as a "stalled_seconds"
+        // counter in the monitoring JSON (consumed by Prometheus downstream).
+        auto oldest_cycle = CurlWorker::GetOldestWorkerCycle();
+        bool is_stalled = (oldest_cycle != std::chrono::system_clock::time_point::min()) &&
+                          ((now - oldest_cycle) > kStallThreshold);
+        if (is_stalled) {
+            auto stall_age = now - oldest_cycle;
+            auto stall_seconds = std::chrono::duration_cast<std::chrono::seconds>(stall_age).count();
+            m_log->Error(kLogXrdClCurl,
+                "Curl worker queue appears stalled: no worker has completed a loop iteration in %lld seconds",
+                static_cast<long long>(stall_seconds));
+            // First detection: attribute the entire stall so far (which is at
+            // least kStallThreshold).  Subsequent detections during the same
+            // stall: attribute time since last tick.  Use steady_clock for
+            // the inter-tick delta so NTP jumps don't corrupt the counter.
+            auto attribution = was_stalled
+                ? std::chrono::duration_cast<std::chrono::milliseconds>(steady_now - last_tick)
+                : std::chrono::duration_cast<std::chrono::milliseconds>(stall_age);
+            HandlerQueue::RecordStall(attribution);
+        }
+        was_stalled = is_stalled;
+        last_tick = steady_now;
 
         std::string monitoring = "{\"event\": \"xrdclcurl\", "
             "\"start\": " + std::to_string(std::chrono::duration<double>(m_start.time_since_epoch()).count()) + ","

@@ -71,6 +71,8 @@ std::mutex CurlWorker::m_worker_stats_mutex;
 std::atomic<uint64_t> HandlerQueue::m_ops_consumed = 0; // Count of operations consumed from the queue.
 std::atomic<uint64_t> HandlerQueue::m_ops_produced = 0; // Count of operations added to the queue.
 std::atomic<uint64_t> HandlerQueue::m_ops_rejected = 0; // Count of operations rejected by the queue.
+std::atomic<uint64_t> HandlerQueue::m_ops_expired = 0;      // Count of operations reaped by Expire() while waiting in queue.
+std::atomic<uint64_t> HandlerQueue::m_queue_stalled_ms = 0; // Cumulative milliseconds the queue has been observed stalled.
 
 struct WaitingForBroker {
     CURL *curl{nullptr};
@@ -705,6 +707,9 @@ HandlerQueue::Expire()
             return expired;
         });
     m_ops.erase(it, m_ops.end());
+    if (expired_count) {
+        m_ops_expired.fetch_add(expired_count, std::memory_order_relaxed);
+    }
 
     // The contents of our pipe and the in-memory queue are now off by expired_count.
     // Read exactly that many bytes from the pipe and throw them away.
@@ -819,11 +824,20 @@ HandlerQueue::GetMonitoringJson()
 {
     auto consumed = m_ops_consumed.load(std::memory_order_relaxed);
     auto produced = m_ops_produced.load(std::memory_order_relaxed);
+    auto expired  = m_ops_expired.load(std::memory_order_relaxed);
+    // Pending = ops that were enqueued (produced) and have not yet left the queue
+    // via Consume()/TryConsume() (consumed) or Expire() (expired).  Note: counters
+    // are static and aggregate across the global queue and each worker's
+    // continue-queue.
+    auto pending = produced - consumed - expired;
     return "{"
             "\"produced\":" + std::to_string(produced) + ","
             "\"consumed\":" + std::to_string(consumed) + ","
-            "\"pending\":" + std::to_string(produced - consumed) + ","
-            "\"rejected\":" + std::to_string(m_ops_rejected.load(std::memory_order_relaxed)) +
+            "\"pending\":" + std::to_string(pending) + ","
+            "\"expired\":" + std::to_string(expired) + ","
+            "\"rejected\":" + std::to_string(m_ops_rejected.load(std::memory_order_relaxed)) + ","
+            "\"stalled_seconds\":" + std::to_string(
+                static_cast<double>(m_queue_stalled_ms.load(std::memory_order_relaxed)) / 1000.0) +
         "}";
 }
 
@@ -906,6 +920,23 @@ CurlWorker::CurlWorker(std::shared_ptr<HandlerQueue> queue, VerbsCache &cache, X
 std::tuple<std::string, std::string> CurlWorker::ClientX509CertKeyFile() const
 {
     return std::make_tuple(m_x509_client_cert_file, m_x509_client_key_file);
+}
+
+std::chrono::system_clock::time_point
+CurlWorker::GetOldestWorkerCycle()
+{
+    auto oldest = std::chrono::system_clock::time_point::max();
+    bool any_cycled = false;
+    std::unique_lock lk(m_worker_stats_mutex);
+    for (const auto &entry : m_workers_last_completed_cycle) {
+        if (!entry) continue;
+        auto raw = entry->load(std::memory_order_relaxed);
+        if (raw == 0) continue; // Worker has not yet recorded a cycle.
+        any_cycled = true;
+        auto tp = std::chrono::system_clock::time_point(std::chrono::system_clock::duration(raw));
+        if (tp < oldest) oldest = tp;
+    }
+    return any_cycled ? oldest : std::chrono::system_clock::time_point::min();
 }
 
 std::string

@@ -67,6 +67,14 @@ public:
 
     static std::string GetMonitoringJson();
 
+    // Returns the oldest "last completed loop iteration" timestamp across all
+    // known curl workers.  Used by Factory::Monitor as a watchdog: if no worker
+    // has cycled in a long time, the queue may be stalled.
+    //
+    // Returns std::chrono::system_clock::time_point::min() if there are no
+    // workers that have ever recorded a cycle (e.g., during early startup).
+    static std::chrono::system_clock::time_point GetOldestWorkerCycle();
+
 private:
     // Invoked when the plugin is unloaded, triggers the shutdown of each of the worker threads.
     static void ShutdownAll() __attribute__((destructor));
